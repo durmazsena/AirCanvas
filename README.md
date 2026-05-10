@@ -129,32 +129,44 @@ Fırça/silgi seçimi de aynı dwell-time mantığıyla çalışır.
 
 ```
 aircanvas/
-├── main.py              # Ana uygulama döngüsü ve durum makinesi
+├── main.py              # Masaüstü uygulama (kamera döngüsü)
+├── engine.py            # Çekirdek işleme motoru (tüm mantık burada)
+├── api.py               # FastAPI REST API
 ├── hand_tracker.py      # MediaPipe el takibi, parmak algılama, jest motoru
 ├── canvas_manager.py    # Tuval yönetimi, stroke render, silgi, sürükleme
 ├── stroke.py            # Stroke veri sınıfı ve fırça efektleri (neon, rainbow)
 ├── ui_palette.py        # Yan panel UI, butonlar, dwell-time seçim
 ├── hand_landmarker.task # MediaPipe model dosyası
 ├── requirements.txt     # Python bağımlılıkları
-├── agent.md             # Proje vizyon ve yol haritası
 └── README.md            # Bu dosya
 ```
 
 ### Modül Diyagramı
 
 ```
-┌──────────┐     ┌───────────────┐     ┌────────────────┐
-│  Kamera  │────▶│ HandTracker   │────▶│    main.py     │
-│ (cv2)    │     │ (MediaPipe)   │     │ (Durum Makinesi)│
-└──────────┘     └───────────────┘     └───────┬────────┘
-                                               │
-                          ┌────────────────────┼──────────────┐
-                          ▼                    ▼              ▼
-                   ┌─────────────┐    ┌──────────────┐  ┌──────────┐
-                   │CanvasManager│    │  UIPalette   │  │  Stroke  │
-                   │(Render/Silgi│    │(Renk/Fırça)  │  │(Veri/Efekt│
-                   │/Sürükleme)  │    │              │  │          │
-                   └─────────────┘    └──────────────┘  └──────────┘
+                  ┌─────────────────────────────────────┐
+                  │          AirCanvasEngine             │
+                  │  (engine.py — tüm mantık burada)    │
+                  └──────┬──────────┬──────────┬────────┘
+                         │          │          │
+        ┌────────────────▼──┐  ┌────▼──────┐  ┌▼───────────┐
+        │   HandTracker     │  │  Canvas   │  │ UIPalette  │
+        │   (MediaPipe)     │  │  Manager  │  │ (Renk/Fırça│
+        └───────────────────┘  └─────┬─────┘  └────────────┘
+                                     │
+                                ┌────▼─────┐
+                                │  Stroke  │
+                                │(Veri/Efekt│
+                                └──────────┘
+    ┌──────────┐                      ▲
+    │ main.py  │──── process_frame ───┘
+    │ (Kamera) │
+    └──────────┘
+
+    ┌──────────┐                      ▲
+    │  api.py  │──── process_frame ───┘
+    │ (FastAPI)│
+    └──────────┘
 ```
 
 ---
@@ -165,7 +177,74 @@ aircanvas/
 opencv-python>=4.8.0
 mediapipe>=0.10.0
 numpy>=1.24.0
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+python-multipart>=0.0.6
 ```
+
+---
+
+## 🌐 API Kullanımı
+
+AirCanvas bir REST API olarak da kullanılabilir. Geliştiriciler kendi uygulamalarına entegre edebilir.
+
+### API Sunucusunu Başlatma
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+Swagger dokümantasyonu: http://localhost:8000/docs
+
+### API Endpointleri
+
+| Method | Endpoint | Açıklama |
+|---|---|---|
+| `POST` | `/api/process` | Frame gönder → işlenmiş frame + JSON al |
+| `GET` | `/api/sessions/{id}` | Oturum bilgilerini al |
+| `GET` | `/api/sessions/{id}/strokes` | Tüm stroke'ları JSON al |
+| `POST` | `/api/sessions/{id}/color` | Renk değiştir |
+| `POST` | `/api/sessions/{id}/brush` | Fırça değiştir |
+| `POST` | `/api/sessions/{id}/thickness` | Kalınlık değiştir |
+| `DELETE` | `/api/sessions/{id}` | Tuvali temizle |
+| `GET` | `/api/health` | Sunucu sağlık kontrolü |
+
+### Örnek İstemci (Python)
+
+```python
+import requests, base64, cv2
+
+# Frame'i base64'e çevir
+frame = cv2.imread("kare.jpg")
+_, buffer = cv2.imencode('.jpg', frame)
+frame_b64 = base64.b64encode(buffer).decode()
+
+# Frame'i işle
+response = requests.post("http://localhost:8000/api/process", json={
+    "session_id": "user1",
+    "frame": frame_b64,
+    "width": 1920,
+    "height": 1080,
+})
+
+data = response.json()
+print(data["gesture"])        # "DRAW", "IDLE", ...
+print(data["stroke_count"])   # 5
+print(data["strokes"])        # [{points, color, brush_type}, ...]
+
+# Renk değiştir
+requests.post("http://localhost:8000/api/sessions/user1/color", json={
+    "color": [0, 255, 0]
+})
+```
+
+### Oturum Yönetimi
+
+- Her `session_id` için ayrı bir motor instance oluşturulur
+- Oturumlar 10 dakika inaktivite sonrası otomatik temizlenir
+- Palet etkileşimi jest tabanlıdır (frame içinde çalışır)
+- Renk/fırça/kalınlık API üzerinden de değiştirilebilir
 
 ---
 
@@ -189,12 +268,7 @@ numpy>=1.24.0
 ### Debounce Sistemi
 - Her jest geçişinde sayaç tabanlı debounce uygulanır.
 - Anlık parmak pozisyonu değişiklikleri (gürültü) filtrelenir.
-- Üç satırlık temiz implementasyon:
-  ```python
-  draw_count  = draw_count + 1  if gesture == "DRAW"  else 0
-  pinch_count = pinch_count + 1 if gesture == "PINCH" else 0
-  clear_count = clear_count + 1 if gesture == "CLEAR" else 0
-  ```
+- Temizleme jesti: Açık avuçla ekranın %50'sini süpürme hareketi gerekir.
 
 ---
 
@@ -204,7 +278,7 @@ numpy>=1.24.0
 - [x] **Phase 2:** Nesne tabanlı Stroke sistemi
 - [x] **Phase 3:** Jest algılama, durum makinesi, sürükleme
 - [x] **Phase 4:** UI paleti, fırça efektleri, silgi, kalınlık
-- [ ] **Phase 5:** API / Mikroservis arayüzü
+- [x] **Phase 5:** API / Mikroservis arayüzü
 
 ---
 
@@ -219,3 +293,5 @@ Bu proje eğitim ve araştırma amaçlı geliştirilmiştir.
 - [MediaPipe](https://developers.google.com/mediapipe) — El takibi modeli
 - [OpenCV](https://opencv.org/) — Görüntü işleme
 - [NumPy](https://numpy.org/) — Sayısal hesaplamalar
+- [FastAPI](https://fastapi.tiangolo.com/) — REST API framework
+

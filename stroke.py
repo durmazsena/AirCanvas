@@ -139,6 +139,22 @@ class Stroke:
         """Stroke boş mu?"""
         return len(self.points) == 0
 
+    # ── Serileştirme ──────────────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        """
+        Stroke'u JSON-uyumlu sözlük olarak döndürür.
+        API yanıtlarında kullanılır.
+        """
+        return {
+            "points": self.points,
+            "color": list(self.color),
+            "thickness": self.thickness,
+            "brush_type": self.brush_type,
+            "point_count": len(self.points),
+            "bounding_box": list(self.get_bounding_box()),
+        }
+
     def __repr__(self) -> str:
         return (f"Stroke(points={len(self.points)}, color={self.color}, "
                 f"brush={self.brush_type})")
